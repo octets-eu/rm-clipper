@@ -1,0 +1,8 @@
+.DS_Store
+build/
+tmp/
+backup-*/
+
+# Local notes: home network, device setup
+CLAUDE.md
+HANDOVER.md

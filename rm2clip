@@ -1,0 +1,80 @@
+#!/bin/bash
+# rm2clip - copy the page currently open on the reMarkable 2 to the Mac clipboard as PNG.
+#
+#   rm2clip           whole page
+#   rm2clip --trim    crop to the ink (ignores the page template), with a small margin
+#
+# Host: $RM2_HOST if set (the tablet's Wi-Fi address), otherwise USB.
+# Needs: ssh key login, pdftoppm (poppler), magick (ImageMagick).
+
+set -euo pipefail
+
+TRIM=0
+[ "${1:-}" = "--trim" ] && TRIM=1
+
+DPI=226          # native RM2 resolution (1404 x 1872)
+MARGIN=24        # px around the ink when trimming
+PORT=18080
+DATA=/home/root/.local/share/remarkable/xochitl
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=4)
+
+# --- find the tablet -------------------------------------------------------
+HOST=""
+for h in ${RM2_HOST:-} 10.11.99.1; do
+  if nc -z -G 2 "$h" 22 >/dev/null 2>&1; then HOST=$h; break; fi
+done
+[ -n "$HOST" ] || { echo "rm2clip: tablet not reachable (asleep? for Wi-Fi set RM2_HOST to its address)" >&2; exit 1; }
+
+WORK=$(mktemp -d)
+SOCK="$WORK/ssh.sock"
+cleanup() {
+  ssh -S "$SOCK" -O exit "root@$HOST" >/dev/null 2>&1 || true
+  [ -d "$WORK" ] && find "$WORK" -type f -delete && rmdir "$WORK" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# One connection: used for the query and as tunnel to the tablet's web export.
+ssh "${SSH_OPTS[@]}" -M -S "$SOCK" -f -N -o ExitOnForwardFailure=yes \
+    -L "$PORT:10.11.99.1:80" "root@$HOST"
+
+# --- which document / page is open ----------------------------------------
+# The most recently written .metadata is the open document; lastOpenedPage is 0-based.
+INFO=$(ssh -S "$SOCK" "root@$HOST" "
+  cd $DATA
+  f=\$(ls -t *.metadata | head -n 1)
+  echo \"\${f%.metadata}\"
+  grep -o '\"lastOpenedPage\": *[-0-9]*' \"\$f\" | grep -o '[-0-9]*\$'
+  grep -o '\"visibleName\": *\"[^\"]*\"' \"\$f\" | sed 's/.*: *\"//; s/\"\$//'
+")
+UUID=$(sed -n 1p <<<"$INFO")
+IDX=$(sed -n 2p <<<"$INFO")
+NAME=$(sed -n 3p <<<"$INFO")
+[ -n "$UUID" ] || { echo "rm2clip: could not determine the open document" >&2; exit 1; }
+[ "${IDX:--1}" -ge 0 ] 2>/dev/null || IDX=0
+PAGE=$((IDX + 1))
+
+# --- export, render, clip --------------------------------------------------
+curl -sf -m 60 -o "$WORK/doc.pdf" "http://127.0.0.1:$PORT/download/$UUID/pdf" \
+  || { echo "rm2clip: PDF export failed (is 'USB web interface' enabled on the tablet?)" >&2; exit 1; }
+
+pdftoppm -png -r "$DPI" -f "$PAGE" -l "$PAGE" -singlefile "$WORK/doc.pdf" "$WORK/page"
+OUT="$WORK/page.png"
+[ -s "$OUT" ] || { echo "rm2clip: page $PAGE not found in export" >&2; exit 1; }
+
+if [ "$TRIM" = 1 ]; then
+  # Ink is near-black, templates are grey: threshold to find the ink's bounding box.
+  BOX=$(magick "$OUT" -colorspace Gray -threshold 35% -format '%@' info: 2>/dev/null || true)
+  if [[ "$BOX" =~ ^([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -gt 1 ]; then
+    W=$((BASH_REMATCH[1] + 2 * MARGIN)); H=$((BASH_REMATCH[2] + 2 * MARGIN))
+    X=$((BASH_REMATCH[3] - MARGIN));     Y=$((BASH_REMATCH[4] - MARGIN))
+    [ "$X" -lt 0 ] && X=0; [ "$Y" -lt 0 ] && Y=0
+    magick "$OUT" -crop "${W}x${H}+${X}+${Y}" +repage "$WORK/trim.png"
+    OUT="$WORK/trim.png"
+  else
+    echo "rm2clip: no ink found, copying whole page" >&2
+  fi
+fi
+
+osascript -e "set the clipboard to (read (POSIX file \"$OUT\") as «class PNGf»)"
+SIZE=$(magick identify -format '%wx%h' "$OUT")
+echo "Copied: \"$NAME\" page $PAGE ($SIZE px) via $HOST"
