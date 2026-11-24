@@ -13,5 +13,6 @@
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key><string>RM-Clipper connects to your reMarkable tablets over the local network to read the page that is open on them.</string>
+    <key>NSAppleEventsUsageDescription</key><string>RM-Clipper asks the browser for the title and address of the current tab when you save a snippet.</string>
 </dict>
 </plist>

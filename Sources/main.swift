@@ -42,11 +42,11 @@ let cropMargin = 24           // px around the ink
 /// Runs a tool and returns its exit status and stdout. stdin and stderr go to
 /// /dev/null so a backgrounded ssh can never hold a pipe open.
 @discardableResult
-func run(_ exe: String, _ args: [String], timeout: Double, capture: Bool = true) -> (status: Int32, out: Data) {
+func run(_ exe: String, _ args: [String], timeout: Double, capture: Bool = true, input: FileHandle? = nil) -> (status: Int32, out: Data) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: exe)
     p.arguments = args
-    p.standardInput = FileHandle.nullDevice
+    p.standardInput = input ?? FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
     let pipe = Pipe()
     p.standardOutput = capture ? pipe : FileHandle.nullDevice
@@ -218,9 +218,9 @@ struct Signature: Equatable {
 final class Tablet {
     let device: Device
     let queue: DispatchQueue
-    private let ssh = "/usr/bin/ssh"
+    let ssh = "/usr/bin/ssh"
     private let sock: String
-    private var host: String?
+    var host: String?
     private var timer: DispatchSourceTimer?
     private var exported: Signature?
     private var pending: Signature?
@@ -232,6 +232,7 @@ final class Tablet {
     var onBusy: ((Bool) -> Void)?
     var onPrint: ((String) -> Void)?
     private var nextSend = Date.distantPast
+    var nextSnippets = Date.distantPast
     private let webSock: String
 
     init(_ device: Device) {
@@ -255,13 +256,20 @@ final class Tablet {
         }
     }
 
-    func update() { queue.async { self.poll(force: true) } }
+    /// Reads the open page again and sends what is waiting, without delay.
+    func synchronize() {
+        queue.async {
+            self.nextSend = .distantPast
+            self.nextSnippets = .distantPast
+            self.poll(force: true)
+        }
+    }
 
     func shutdown() { queue.sync { self.stopMaster() } }
 
     // The saved host key identifies the tablet at any address, so a changed DHCP
     // lease is still verified and other machines (or the other tablet) are rejected.
-    private var base: [String] {
+    var base: [String] {
         ["-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=yes",
          "-o", "HostKeyAlias=\(device.hostKeyAlias)"] + device.sshIdentity + ["-S", sock]
     }
@@ -283,7 +291,7 @@ final class Tablet {
         }
     }
 
-    private func remote(_ cmd: String, timeout: Double) -> Data? {
+    func remote(_ cmd: String, timeout: Double) -> Data? {
         guard let h = host else { return nil }
         let r = run(ssh, base + ["root@\(h)", cmd], timeout: timeout)
         return r.status == 0 ? r.out : nil
@@ -293,35 +301,42 @@ final class Tablet {
 
     /// Sends waiting print jobs to the inbox folder. Runs on the tablet's queue.
     private func sendWaiting() {
-        guard let inbox = device.inbox, let h = host, Date() >= nextSend else { return }
+        guard let inbox = device.inbox, host != nil, Date() >= nextSend else { return }
         let jobs = Outbox.waiting()
         guard !jobs.isEmpty else { return }
         func report(_ s: String) { DispatchQueue.main.async { self.onPrint?(s) } }
-        // The web interface listens only on the tablet itself; reach it over our connection.
+        let ok = withWebInterface {
+            let folder = folderID(inbox)
+            for job in jobs {
+                guard upload(job, folder: folder) else {
+                    report("Print waiting: upload failed, USB web interface off?")
+                    nextSend = Date().addingTimeInterval(30)
+                    return
+                }
+                Outbox.markSent(job)
+                report("Sent \"\(job.title)\" to \(folder == nil ? "My files (no \(inbox) folder)" : inbox)")
+            }
+        }
+        if !ok { nextSend = Date().addingTimeInterval(30) }
+    }
+
+    /// The web interface listens only on the tablet itself; reach it over our connection.
+    @discardableResult
+    func withWebInterface(_ body: () -> Void) -> Bool {
+        guard let h = host else { return false }
         try? FileManager.default.removeItem(atPath: webSock)
         let forward = ["-L", "\(webSock):\(usbHost):80", "root@\(h)"]
-        guard run(ssh, base + ["-O", "forward"] + forward, timeout: 5, capture: false).status == 0 else {
-            nextSend = Date().addingTimeInterval(30)
-            return
-        }
+        guard run(ssh, base + ["-O", "forward"] + forward, timeout: 5, capture: false).status == 0 else { return false }
         defer {
             run(ssh, base + ["-O", "cancel"] + forward, timeout: 5, capture: false)
             try? FileManager.default.removeItem(atPath: webSock)
         }
-        let folder = folderID(inbox)
-        for job in jobs {
-            guard upload(job, folder: folder) else {
-                report("Print waiting: upload failed, USB web interface off?")
-                nextSend = Date().addingTimeInterval(30)
-                return
-            }
-            Outbox.markSent(job)
-            report("Sent \"\(job.title)\" to \(folder == nil ? "My files (no \(inbox) folder)" : inbox)")
-        }
+        body()
+        return true
     }
 
     /// The tablet stores an upload in the folder that was listed last.
-    private func upload(_ job: Job, folder: String?) -> Bool {
+    func upload(_ job: Job, folder: String?) -> Bool {
         func curl(_ args: [String], timeout: Int) -> String {
             let r = run("/usr/bin/curl", ["-s", "-m", String(timeout), "--unix-socket", webSock, "-o", "/dev/null",
                                           "-w", "%{http_code}"] + args, timeout: Double(timeout) + 5)
@@ -337,7 +352,7 @@ final class Tablet {
     }
 
     /// UUID of a top-level folder, or nil if the tablet has none of that name.
-    private func folderID(_ name: String) -> String? {
+    func folderID(_ name: String) -> String? {
         let script = #"""
         cd \#(dataDir) || exit 1
         for f in $(grep -l '"type": *"CollectionType"' *.metadata); do
@@ -415,7 +430,7 @@ final class Tablet {
         return s
     }
 
-    private func poll(force: Bool) {
+    func poll(force: Bool) {
         if let h = host, !masterAlive(h) { stopMaster(); host = nil }
         if host == nil {
             host = discover()
@@ -426,6 +441,7 @@ final class Tablet {
         let h = host
         DispatchQueue.main.async { self.onFound?(true, h) }
         sendWaiting()
+        sendSnippets()
         if sig.uuid.isEmpty { pending = nil; return }
 
         if !force, sig == exported { pending = nil; return }
@@ -569,6 +585,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let sections = Device.all.map { Section($0) }
     private let printer = PrintServer()
+    private let capture = SnippetCapture()
+    private let snippetHeader = NSMenuItem(title: "Snippets: mark text, press ⌃⌥⌘S", action: nil, keyEquivalent: "")
+    private let sync = NSMenuItem(title: "Synchronize", action: #selector(synchronize), keyEquivalent: "r")
+    private let permissions = NSMenu()
     private let printInfo = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
     private var lastPrint = ""
@@ -586,19 +606,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             s.onChange = { [weak self] in self?.refreshTitle() }
             s.tablet.onPrint = { [weak self] text in self?.lastPrint = text; self?.refreshPrint() }
         }
+        snippetHeader.isEnabled = false
+        menu.addItem(snippetHeader)
+        let show = NSMenuItem(title: "Show snippets.md in finder", action: #selector(showSnippets), keyEquivalent: "")
+        show.target = self
+        menu.addItem(show)
+        menu.addItem(.separator())
         printInfo.isEnabled = false
         menu.addItem(printInfo)
         menu.addItem(.separator())
-        let update = NSMenuItem(title: "Update", action: #selector(updateNow), keyEquivalent: "r")
-        update.target = self
-        menu.addItem(update)
+        sync.target = self
+        menu.addItem(sync)
         login.target = self
         menu.addItem(login)
+        let perm = NSMenuItem(title: "Permissions", action: nil, keyEquivalent: "")
+        perm.submenu = permissions
+        permissions.autoenablesItems = false
+        menu.addItem(perm)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.delegate = self
         item.menu = menu
         refreshTitle()
         refreshPrint()
+        capture.onSaved = { [weak self] in self?.flash("RM +1") }
+        if !capture.install() { snippetHeader.title = "Snippets: ⌃⌥⌘S is taken by another app" }
         printer.start()
         sections.forEach { $0.tablet.start() }
     }
@@ -626,21 +657,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The text items can make the menu wider than the previews; widen them to match.
     func menuNeedsUpdate(_ menu: NSMenu) {
         refreshPrint()
+        refreshSnippets()
         login.state = LoginItem.enabled ? .on : .off
         sections.forEach { $0.preview.fit(width: PreviewView.width) }
         let w = max(PreviewView.width, menu.size.width)
         sections.forEach { $0.preview.fit(width: w) }
     }
 
-    @objc private func updateNow() { sections.forEach { $0.tablet.update() } }
+    /// Previews of all tablets, waiting prints, and the snippets if they have changed.
+    @objc private func synchronize() {
+        if Snippets.news != nil, sections.contains(where: { $0.tablet.device.inbox != nil }) {
+            Snippets.pending = true
+            lastPrint = "Snippets: sending when the Paper Pro is reachable"
+            refreshPrint()
+        }
+        sections.forEach { $0.tablet.synchronize() }
+    }
 
     private func copy(_ clip: Clip) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setData(clip.png, forType: .png)
         if let tiff = clip.image.tiffRepresentation { pb.setData(tiff, forType: .tiff) }
-        item.button?.title = "RM ✓"
+        flash("RM ✓")
+    }
+
+    private func flash(_ title: String) {
+        item.button?.title = title
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.item.button?.title = "RM" }
+    }
+
+    // MARK: Snippets and permissions
+
+    private func refreshSnippets() {
+        sync.title = Snippets.pending ? "Synchronize (snippets waiting)" : Snippets.news.map { "Synchronize (\($0))" } ?? "Synchronize"
+        permissions.removeAllItems()
+        func add(_ title: String, _ ok: Bool?, _ action: Selector) {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            i.target = self
+            i.state = ok == true ? .on : .off
+            permissions.addItem(i)
+        }
+        add(AXIsProcessTrusted() ? "Accessibility" : "Accessibility: allow, to read marked text…", AXIsProcessTrusted(), #selector(openAccessibility))
+        let browsers = NSWorkspace.shared.runningApplications.compactMap { a -> (String, String)? in
+            guard let b = a.bundleIdentifier, Reader.safariLike.contains(b) || Reader.chromeLike.contains(b) else { return nil }
+            return (b, a.localizedName ?? b)
+        }
+        for (b, name) in browsers {
+            let ok = Permission.automation(b)
+            add("Automation, \(name)" + (ok == true ? "" : ok == false ? ": not allowed, for page titles…" : ": asked at the first snippet"), ok, #selector(openAutomation))
+        }
+        if browsers.isEmpty { add("Automation: asked at the first snippet in a browser", nil, #selector(openAutomation)) }
+        let network = sections.contains { $0.found }
+        add(network ? "Local Network" : "Local Network: no tablet reached yet…", network, #selector(openLocalNetwork))
+    }
+
+    @objc private func openAccessibility() { Permission.accessibility() }
+    @objc private func openAutomation() { Permission.settings("Privacy_Automation") }
+    @objc private func openLocalNetwork() { Permission.settings("Privacy_LocalNetwork") }
+
+    @objc private func showSnippets() {
+        let f = Snippets.file
+        let target = FileManager.default.fileExists(atPath: f.path) ? f : f.deletingLastPathComponent()
+        NSWorkspace.shared.activateFileViewerSelecting([target])
     }
 }
 
@@ -663,6 +742,14 @@ if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--fit" {
     let out = fitToScreen(pdf)
     print(out == nil ? "unchanged" : "fitted", "- title:", Outbox.title(job: nil, pdf: pdf))
     try? (out ?? pdf).write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
+    exit(0)
+}
+// `--snippets in.md out.pdf` runs only the rendering of the snippets.
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--snippets" {
+    guard let md = try? String(contentsOfFile: CommandLine.arguments[2], encoding: .utf8),
+          let r = SnippetPDF.render(Snippets.parse(md)) else { exit(1) }
+    try? r.pdf.write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
+    print("\(r.pages) pages")
     exit(0)
 }
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--login" {

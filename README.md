@@ -2,12 +2,15 @@
 
 A macOS menu bar app for the reMarkable 2 and Paper Pro.
 
-- **Clip:** shows the page open on the tablet. Click the preview to copy it to the clipboard, cropped to the ink.
-- **Print (Paper Pro):** adds a printer to your Mac. Whatever you print lands as a PDF in the tablet's "Incoming" folder, fitted to its screen and clear of the menu.
+- **Prints** land in `Incoming` on the reMarkable: print from any app, as a PDF fitted to the screen and clear of the menu.
+- **Clips** land in the app, ready to copy on the Mac: the page open on the tablet, cropped to the ink.
+- **Snippets** land in `Incoming/Snippets` on the reMarkable, one PDF that grows: mark text anywhere on the Mac, press ⌃⌥⌘S, and it is added with its title and source.
+
+Prints and snippets are sent to the Paper Pro; a reMarkable 2 on the same account gets them through reMarkable's own sync. Clips work with both.
 
 <img src="docs/menu.png" width="380" alt="RM-Clipper menu with a preview of the page open on each tablet">
 
-It talks to the tablet directly over SSH: no cloud, nothing installed on the tablet. Early stage, tested only on macOS 27 with tablet software 3.29. Not affiliated with reMarkable.
+It talks to the tablet directly over SSH, with nothing installed on it. Early stage, tested only on macOS 27 with tablet software 3.29. Not affiliated with reMarkable.
 
 ## You need
 
@@ -29,7 +32,7 @@ ssh -o HostKeyAlias=rmpp root@10.11.99.1 rm-ssh-over-wlan on
 
 reMarkable 2: the same two commands without `-o HostKeyAlias=rmpp`.
 
-For printing, create a folder named "Incoming" at the top level of the Paper Pro.
+For prints and snippets, create a folder named "Incoming" at the top level of the Paper Pro.
 
 ## Build and run
 
@@ -42,16 +45,26 @@ cd rm-clipper
 
 The app looks for the tablet at its last known address and over USB, and searches your local network if it is not there. To set the address yourself: `defaults write local.rm-clipper rmpp.host <ip>` (`rm2.host` for the reMarkable 2), then restart the app.
 
+## Use
+
+- **Clips:** open the RM menu and click a preview to copy it.
+- **Prints:** print from any app to "reMarkable Paper Pro".
+- **Snippets:** mark text, press ⌃⌥⌘S and let go. macOS asks for Accessibility (RM menu → Permissions) and, for page titles, for Automation the first time you use it in a browser. Your clipboard stays as it was.
+- **Synchronize** (⌘R) refreshes the clips, retries waiting prints and, if they have changed, sends the snippets.
+
+Snippets are collected in `Snippets.md`, with a `Snippets.pdf` next to it, in iCloud Drive/Remarkable (Documents/Remarkable without iCloud; `defaults write local.rm-clipper snippetsFile <path>` to change it). You can edit the file: `## date - title`, `> text` and `- source` are what the PDF shows.
+
 ## Good to know
 
 - A sleeping tablet is unreachable. Prints wait and are sent when it wakes up. If the app is not running, macOS holds them.
 - The printer listens only on your own Mac.
 - In Safari, print articles from Reader view; normal pages may come out cut up or incomplete.
 - Grey ink cannot be told apart from grey page templates when cropping.
+- Snippets replaces the PDF of a document the app uploaded, only while it is closed on the tablet. reMarkable's sync accepts this but logs a warning and sends a small error report each time. If you have written on the document, it is left alone.
 
 ## Remove
 
-Run `./printer.sh remove`, untick Start at Login in the RM menu, quit, and delete the folder and `~/Library/Application Support/RM-Clipper`.
+Run `./printer.sh remove`, untick Start at Login in the RM menu, quit, and delete the folder and `~/Library/Application Support/RM-Clipper`. Take back Accessibility and Automation under System Settings → Privacy & Security. Your snippets stay in their folder.
 
 ## License
 

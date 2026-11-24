@@ -10,8 +10,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Sources/rmpp.conf "$APP/Contents/Resources/"
 swiftc -O -wmo -swift-version 5 -o "$APP/Contents/MacOS/rm-clipper" Sources/*.swift
 cp Info.plist "$APP/Contents/Info.plist"
-# Ad hoc signature so the Local Network permission sticks across rebuilds.
-codesign -s - --force "$APP" 2>/dev/null
+# Ad hoc signature, tied to the identifier instead of the exact build, so that the Local
+# Network, Accessibility and Automation permissions stick across rebuilds.
+codesign -s - --force -r='designated => identifier "local.rm-clipper"' "$APP" 2>/dev/null
 echo "Built $APP"
 
 if [ "${1:-}" = "run" ]; then
