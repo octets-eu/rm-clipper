@@ -299,22 +299,37 @@ final class Tablet {
 
     // MARK: Print jobs
 
-    /// Sends waiting print jobs to the inbox folder. Runs on the tablet's queue.
+    /// Sends waiting jobs, prints to the inbox folder, images to theirs. Runs on the tablet's queue.
     private func sendWaiting() {
         guard let inbox = device.inbox, host != nil, Date() >= nextSend else { return }
         let jobs = Outbox.waiting()
         guard !jobs.isEmpty else { return }
         func report(_ s: String) { DispatchQueue.main.async { self.onPrint?(s) } }
         let ok = withWebInterface {
-            let folder = folderID(inbox)
-            for job in jobs {
-                guard upload(job, folder: folder) else {
-                    report("Print waiting: upload failed, USB web interface off?")
+            var ids: [String: String?] = [:]
+            for var job in jobs {
+                let name = job.folder ?? inbox
+                let id = ids[name] ?? folderID(name)
+                ids[name] = .some(id)
+                // Images get their number when they are sent.
+                var number: Int?
+                if job.folder != nil {
+                    number = nextColorize()
+                    guard let n = number, let j = try? job.renamed(String(format: "\(Colorize.name) %02d", n)) else {
+                        report("Image waiting: no answer from the \(device.name)")
+                        nextSend = Date().addingTimeInterval(30)
+                        return
+                    }
+                    job = j
+                }
+                guard upload(job, folder: id) else {
+                    report("\(number == nil ? "Print" : "Image") waiting: upload failed, USB web interface off?")
                     nextSend = Date().addingTimeInterval(30)
                     return
                 }
+                if let n = number { Colorize.given(n) }
                 Outbox.markSent(job)
-                report("Sent \"\(job.title)\" to \(folder == nil ? "My files (no \(inbox) folder)" : inbox)")
+                report("Sent \"\(job.title)\" to \(id == nil ? "My files (no \(name) folder)" : name)")
             }
         }
         if !ok { nextSend = Date().addingTimeInterval(30) }
@@ -587,6 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let printer = PrintServer()
     private let capture = SnippetCapture()
     private let snippetHeader = NSMenuItem(title: "Snippets: mark text, press ⌃⌥⌘S", action: nil, keyEquivalent: "")
+    private let colorize = NSMenuItem(title: "Colorize", action: #selector(colorizeClipboard), keyEquivalent: "")
     private let sync = NSMenuItem(title: "Synchronize", action: #selector(synchronize), keyEquivalent: "r")
     private let permissions = NSMenu()
     private let printInfo = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -611,6 +627,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let show = NSMenuItem(title: "Show snippets.md in finder", action: #selector(showSnippets), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
+        menu.addItem(.separator())
+        colorize.target = self
+        menu.addItem(colorize)
         menu.addItem(.separator())
         printInfo.isEnabled = false
         menu.addItem(printInfo)
@@ -640,8 +659,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshPrint() {
-        let n = Outbox.waiting().count
-        if n > 0, !lastPrint.hasPrefix("Print waiting") { printInfo.title = n == 1 ? "1 print waiting for the Paper Pro" : "\(n) prints waiting for the Paper Pro" }
+        let jobs = Outbox.waiting(), n = jobs.count
+        let images = jobs.filter { $0.folder != nil }.count
+        let kind = images == 0 ? "print" : images == n ? "image" : "document"
+        if n > 0, !lastPrint.hasPrefix("Print waiting"), !lastPrint.hasPrefix("Image waiting") { printInfo.title = "\(n) \(kind)\(n == 1 ? "" : "s") waiting for the Paper Pro" }
         else if !lastPrint.isEmpty { printInfo.title = lastPrint }
         else { printInfo.title = printer.running ? "Printer ready" : "Printer starting…" }
     }
@@ -658,6 +679,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         refreshPrint()
         refreshSnippets()
+        colorize.isEnabled = Colorize.hasImage(.general)
         login.state = LoginItem.enabled ? .on : .off
         sections.forEach { $0.preview.fit(width: PreviewView.width) }
         let w = max(PreviewView.width, menu.size.width)
@@ -680,6 +702,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pb.setData(clip.png, forType: .png)
         if let tiff = clip.image.tiffRepresentation { pb.setData(tiff, forType: .tiff) }
         flash("RM ✓")
+    }
+
+    /// The image on the clipboard, grey and in screen size, into the Paper Pro's image folder.
+    @objc private func colorizeClipboard() {
+        guard let folder = Device.all.lazy.compactMap(\.images).first else { return }
+        func say(_ s: String) { lastPrint = s; refreshPrint() }
+        guard let src = Colorize.source(.general) else { say("Colorize: no image on the clipboard"); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let pdf = Colorize.pdf(src)
+            let ok = pdf.map { (try? Outbox.add($0, title: Colorize.name, folder: folder)) != nil }
+            DispatchQueue.main.async {
+                if ok == nil { say("Colorize: the image could not be read") }
+                else if ok == false { say("Colorize: the image could not be queued") }
+                else { self.lastPrint = ""; self.refreshPrint(); self.flash("RM ✓") }
+            }
+        }
     }
 
     private func flash(_ title: String) {
@@ -750,6 +788,13 @@ if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--snippets" {
           let r = SnippetPDF.render(Snippets.parse(md)) else { exit(1) }
     try? r.pdf.write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
     print("\(r.pages) pages")
+    exit(0)
+}
+// `--colorize in.png out.pdf` runs only the conversion for Colorize.
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--colorize" {
+    guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: CommandLine.arguments[2]) as CFURL, nil),
+          let pdf = Colorize.pdf(src) else { exit(1) }
+    try? pdf.write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
     exit(0)
 }
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--login" {

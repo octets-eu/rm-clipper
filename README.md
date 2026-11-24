@@ -5,8 +5,9 @@ A macOS menu bar app for the reMarkable 2 and Paper Pro.
 - **Prints** land in `Incoming` on the reMarkable: print from any app, as a PDF fitted to the screen and clear of the menu.
 - **Clips** land in the app, ready to copy on the Mac: the page open on the tablet, cropped to the ink.
 - **Snippets** land in `Incoming/Snippets` on the reMarkable, one PDF that grows: mark text anywhere on the Mac, press ⌃⌥⌘S, and it is added with its title and source.
+- **Colorize** (RM menu) lands the image on the clipboard in `Images` on the reMarkable: grey, filling the screen, wide images turned, ready to be drawn on.
 
-Prints and snippets are sent to the Paper Pro; a reMarkable 2 on the same account gets them through reMarkable's own sync. Clips work with both.
+Prints, snippets and images are sent to the Paper Pro; a reMarkable 2 on the same account gets them through reMarkable's own sync. Clips work with both.
 
 <img src="docs/menu.png" width="380" alt="RM-Clipper menu with a preview of the page open on each tablet">
 
@@ -32,7 +33,7 @@ ssh -o HostKeyAlias=rmpp root@10.11.99.1 rm-ssh-over-wlan on
 
 reMarkable 2: the same two commands without `-o HostKeyAlias=rmpp`.
 
-For prints and snippets, create a folder named "Incoming" at the top level of the Paper Pro.
+For prints and snippets, create a folder named "Incoming" at the top level of the Paper Pro, and for Colorize one named "Images".
 
 ## Build and run
 

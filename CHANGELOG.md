@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-11-24 - Colorize: the image on the clipboard lands in `Images` on the Paper Pro, grey and in screen size, ready to be drawn on
 - 2026-11-24 - Snippets: mark text anywhere on the Mac, ⌃⌥⌘S adds it with title and source to `Incoming/Snippets` on the Paper Pro
 - 2026-11-24 - Synchronize: one entry refreshes clips, retries waiting prints and sends changed snippets
 - 2026-11-24 - Permissions: a menu shows what is allowed and opens the right settings

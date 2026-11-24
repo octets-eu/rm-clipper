@@ -100,6 +100,14 @@ struct Job {
     let dir: URL
     let file: URL
     var title: String { file.deletingPathExtension().lastPathComponent }
+    /// Folder on the tablet if it is not the inbox, in a file next to the PDF.
+    var folder: String? { try? String(contentsOf: dir.appendingPathComponent("folder"), encoding: .utf8) }
+    /// The same job with another title.
+    func renamed(_ title: String) throws -> Job {
+        let to = dir.appendingPathComponent(title + ".pdf")
+        if to != file { try FileManager.default.moveItem(at: file, to: to) }
+        return Job(dir: dir, file: to)
+    }
 }
 
 enum Outbox {
@@ -148,7 +156,7 @@ enum Outbox {
         return String(large.prefix(large.count > 3 ? 1 : 3).map(\.text).joined(separator: " ").prefix(100))
     }
 
-    static func add(_ pdf: Data, title: String) throws {
+    static func add(_ pdf: Data, title: String, folder: String? = nil) throws {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyyMMdd-HHmmss-SSS"
@@ -157,6 +165,7 @@ enum Outbox {
         let tmp = Paths.queue.appendingPathComponent(".\(id)")
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try pdf.write(to: tmp.appendingPathComponent(title + ".pdf"))
+        if let folder { try Data(folder.utf8).write(to: tmp.appendingPathComponent("folder")) }
         try fm.moveItem(at: tmp, to: Paths.queue.appendingPathComponent(id))
     }
 
